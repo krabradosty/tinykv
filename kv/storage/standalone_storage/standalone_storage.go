@@ -1,38 +1,81 @@
 package standalone_storage
 
 import (
+	"errors"
+
+	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 )
 
 // StandAloneStorage is an implementation of `Storage` for a single-node TinyKV instance. It does not
 // communicate with other nodes and all data is stored locally.
 type StandAloneStorage struct {
-	// Your Data Here (1).
+	conf *config.Config
+	db   *badger.DB
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
-	// Your Code Here (1).
-	return nil
+	return &StandAloneStorage{conf: conf}
 }
 
 func (s *StandAloneStorage) Start() error {
-	// Your Code Here (1).
+	opts := badger.DefaultOptions
+	opts.Dir = s.conf.DBPath
+	opts.ValueDir = s.conf.DBPath
+	db, err := badger.Open(opts)
+	if err != nil {
+		return err
+	}
+	s.db = db
 	return nil
 }
 
 func (s *StandAloneStorage) Stop() error {
-	// Your Code Here (1).
-	return nil
+	return s.db.Close()
 }
 
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
-	// Your Code Here (1).
-	return nil, nil
+	txn := s.db.NewTransaction(false)
+	return &reader{txn: txn}, nil
 }
 
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
-	// Your Code Here (1).
+	for _, m := range batch {
+		switch d := m.Data.(type) {
+		case storage.Put:
+			err := engine_util.PutCF(s.db, d.Cf, d.Key, d.Value)
+			if err != nil {
+				return err
+			}
+		case storage.Delete:
+			err := engine_util.DeleteCF(s.db, d.Cf, d.Key)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+type reader struct {
+	txn *badger.Txn
+}
+
+func (r *reader) GetCF(cf string, key []byte) ([]byte, error) {
+	val, err := engine_util.GetCFFromTxn(r.txn, cf, key)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil, nil
+	}
+	return val, err
+}
+
+func (r *reader) IterCF(cf string) engine_util.DBIterator {
+	return engine_util.NewCFIterator(cf, r.txn)
+}
+
+func (r *reader) Close() {
+	r.txn.Discard()
 }
